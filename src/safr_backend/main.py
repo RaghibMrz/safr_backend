@@ -1,4 +1,6 @@
 from fastapi import FastAPI
+from .routers import users, auth # Relative import for users and auth routers
+
 
 
 app = FastAPI(
@@ -6,6 +8,10 @@ app = FastAPI(
     description="API for ranking travel destinations.",
     version="0.1.0"
 )
+
+app.include_router(auth.router) # Handles /token
+app.include_router(users.router) # Handles /users/
+
 
 @app.get("/")
 async def read_root():
