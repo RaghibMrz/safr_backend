@@ -30,6 +30,14 @@ FastAPI application entry point.
 
 Database migration tool.
 
+## Cities
+
+Please make sure you seed your database with cities before running the API, you can do this by running the following command:
+
+```bash
+poetry run python scripts/seed_cities.py
+```
+
 ## Demo API calls
 
 ### Get a token
