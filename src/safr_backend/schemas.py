@@ -1,6 +1,7 @@
 from pydantic import BaseModel, EmailStr
 from datetime import datetime
 from typing import Optional
+from pydantic import Field
 
 # --- User Schemas ---
 
@@ -51,39 +52,88 @@ class TokenData(BaseModel):
     # This schema defines the data we expect to be encoded in the JWT (the "subject" or "sub")
     username: Optional[str] = None # Or could be user_id: Optional[int] = None
 
-# --- City Schemas (Example placeholders) ---
-# class CityBase(BaseModel):
-#     name: str
-#     country: str
-#     geoname_id: Optional[str] = None
-#     latitude: Optional[float] = None
-#     longitude: Optional[float] = None
+# --- City Schemas ---
 
-# class CityCreate(CityBase):
-#     pass
+class CityBase(BaseModel):
+    """Base schema for city attributes."""
+    name: str
+    country: str
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    geoname_id: Optional[str] = None # Or int, depending on your data source
 
-# class CityDisplay(CityBase):
-#     id: int
-#     # objective_rating: Optional[float] = None # If we had a global one
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "name": "London",
+                "country": "United Kingdom",
+                "latitude": 51.5074,
+                "longitude": 0.1278,
+                "geoname_id": "2643743"
+            }
+        }
 
-#     class Config:
-#         from_attributes = True
+class CityDisplay(CityBase):
+    """Schema for displaying city information."""
+    id: int # The ID from our database
 
-# --- UserCityRanking Schemas (Example placeholders) ---
-# class UserCityRankingBase(BaseModel):
-#     city_id: int
-#     personal_score: float
+    class Config:
+        from_attributes = True # To map from SQLAlchemy model
+        json_schema_extra = {
+            "example": {
+                "id": 1,
+                "name": "London",
+                "country": "United Kingdom",
+                "latitude": 51.5074,
+                "longitude": 0.1278,
+                "geoname_id": "2643743"
+            }
+        }
 
-# class UserCityRankingCreate(UserCityRankingBase):
-#     pass
+# --- UserCityRanking Schemas ---
 
-# class UserCityRankingDisplay(UserCityRankingBase):
-#     id: int
-#     user_id: int
-#     objective_score: Optional[float] = None
-#     created_at: datetime
-#     updated_at: datetime
-#     # city: CityDisplay # Nested display of city info
+class UserCityRankingCreate(BaseModel):
+    """Schema for creating/updating a user's ranking for a city."""
+    personal_score: float = Field(..., ge=0, le=100, description="User's personal score for the city (0-100)")
+    # city_id will be a path parameter
+    # user_id will come from the authenticated user
 
-#     class Config:
-#         from_attributes = True
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "personal_score": 85.5
+            }
+        }
+
+class UserCityRankingDisplay(BaseModel):
+    """Schema for displaying a user's city ranking."""
+    id: int # ID of the ranking entry itself
+    user_id: int
+    city_id: int
+    personal_score: float
+    objective_score: Optional[float] = None # We'll keep this nullable and ignore for now
+    created_at: datetime
+    updated_at: datetime
+    city: CityDisplay # Include full city details
+
+    class Config:
+        from_attributes = True
+        json_schema_extra = {
+            "example": {
+                "id": 1,
+                "user_id": 1,
+                "city_id": 1,
+                "personal_score": 85.5,
+                "objective_score": None,
+                "created_at": "2024-05-15T10:00:00.000Z",
+                "updated_at": "2024-05-15T10:00:00.000Z",
+                "city": {
+                    "id": 1,
+                    "name": "London",
+                    "country": "United Kingdom",
+                    "latitude": 51.5074,
+                    "longitude": 0.1278,
+                    "geoname_id": "2643743"
+                }
+            }
+        }

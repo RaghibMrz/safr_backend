@@ -1,6 +1,8 @@
 # src/safr_backend/crud.py
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select 
+from sqlalchemy.future import select
+from sqlalchemy.orm import selectinload # For eager loading related City
+from typing import List, Optional
 
 from . import models
 from . import schemas
@@ -78,35 +80,120 @@ async def authenticate_user(db: AsyncSession, username: str, password: str) -> m
     return db_user
 
 
-# Placeholder for future CRUD functions:
-
 # --- City CRUD ---
-# async def create_city(db: AsyncSession, city: schemas.CityCreate) -> models.City:
-#     # ... implementation ...
-#     pass
 
-# async def get_city_by_name_and_country(db: AsyncSession, name: str, country: str) -> models.City | None:
-#     # ... implementation ...
-#     pass
+async def get_city(db: AsyncSession, city_id: int) -> models.City | None:
+    """
+    Retrieves a specific city by its ID.
 
-# async def get_cities(db: AsyncSession, skip: int = 0, limit: int = 100) -> list[models.City]:
-#     # ... implementation ...
-#     pass
+    Args:
+        db: The asynchronous database session.
+        city_id: The ID of the city to retrieve.
 
+    Returns:
+        The City model instance if found, otherwise None.
+    """
+    result = await db.execute(select(models.City).filter(models.City.id == city_id))
+    return result.scalars().first()
+
+async def get_cities(db: AsyncSession, skip: int = 0, limit: int = 100) -> List[models.City]:
+    """
+    Retrieves a list of cities with pagination.
+
+    Args:
+        db: The asynchronous database session.
+        skip: The number of records to skip (for pagination).
+        limit: The maximum number of records to return.
+
+    Returns:
+        A list of City model instances.
+    """
+    result = await db.execute(select(models.City).offset(skip).limit(limit))
+    return result.scalars().all()
 
 # --- UserCityRanking CRUD ---
-# async def create_user_city_ranking(db: AsyncSession, user_id: int, ranking: schemas.UserCityRankingCreate) -> models.UserCityRanking:
-#     # Here you would also calculate or fetch data for objective_score if needed
-#     # objective_score = calculate_objective_score(user_id, ranking.city_id, db)
-#     # db_ranking = models.UserCityRanking(
-#     #     user_id=user_id,
-#     #     city_id=ranking.city_id,
-#     #     personal_score=ranking.personal_score,
-#     #     objective_score=objective_score # Example
-#     # )
-#     # ... implementation ...
-#     pass
 
-# async def get_user_rankings(db: AsyncSession, user_id: int, skip: int = 0, limit: int = 100) -> list[models.UserCityRanking]:
-#     # ... implementation ...
-#     pass
+async def get_user_city_ranking(
+    db: AsyncSession, user_id: int, city_id: int
+) -> Optional[models.UserCityRanking]:
+    """
+    Retrieves a specific ranking for a user and city.
+    """
+    result = await db.execute(
+        select(models.UserCityRanking)
+        .filter(models.UserCityRanking.user_id == user_id)
+        .filter(models.UserCityRanking.city_id == city_id)
+        .options(selectinload(models.UserCityRanking.city)) # Eager load city details
+    )
+    return result.scalars().first()
+
+async def upsert_user_city_ranking(
+    db: AsyncSession, user_id: int, city_id: int, ranking_data: schemas.UserCityRankingCreate
+) -> models.UserCityRanking:
+    """
+    Creates a new city ranking for a user or updates an existing one.
+    The objective_score is not handled here and will remain None or its previous value.
+    """
+    # Check if the city exists
+    city = await get_city(db, city_id=city_id)
+    if not city:
+        # This case should ideally be prevented by frontend or API validation
+        # but good to have a check.
+        raise ValueError(f"City with id {city_id} not found.")
+
+    existing_ranking = await get_user_city_ranking(db, user_id=user_id, city_id=city_id)
+
+    if existing_ranking:
+        # Update existing ranking
+        existing_ranking.personal_score = ranking_data.personal_score
+        # existing_ranking.objective_score remains untouched or None
+        # The updated_at field in models.UserCityRanking will be auto-updated by the DB
+        db.add(existing_ranking)
+        await db.commit()
+        await db.refresh(existing_ranking)
+        # Ensure city is loaded for the response after refresh
+        await db.refresh(existing_ranking, attribute_names=['city'])
+        return existing_ranking
+    else:
+        # Create new ranking
+        db_ranking = models.UserCityRanking(
+            user_id=user_id,
+            city_id=city_id,
+            personal_score=ranking_data.personal_score,
+            objective_score=None # Explicitly set to None for new rankings
+        )
+        db.add(db_ranking)
+        await db.commit()
+        await db.refresh(db_ranking)
+        # Ensure city is loaded for the response after refresh
+        # This is important because the 'city' relationship is needed for UserCityRankingDisplay
+        # and might not be loaded automatically after a simple refresh of db_ranking.
+        # A more robust way is to re-fetch or ensure the session loads it.
+        # For simplicity, we can reload the relationship.
+        await db.refresh(db_ranking, attribute_names=['city'])
+        if db_ranking.city is None: # If city wasn't loaded by refresh, manually assign it
+            db_ranking.city = city
+        return db_ranking
+
+async def get_user_rankings_with_details(
+    db: AsyncSession, user_id: int, skip: int = 0, limit: int = 100, sort_desc: bool = True
+) -> List[models.UserCityRanking]:
+    """
+    Retrieves a list of city rankings for a specific user, ordered by personal_score.
+    Includes city details.
+    """
+    order_by_clause = (
+        models.UserCityRanking.personal_score.desc()
+        if sort_desc
+        else models.UserCityRanking.personal_score.asc()
+    )
+
+    result = await db.execute(
+        select(models.UserCityRanking)
+        .filter(models.UserCityRanking.user_id == user_id)
+        .options(selectinload(models.UserCityRanking.city)) # Eager load city details
+        .order_by(order_by_clause)
+        .offset(skip)
+        .limit(limit)
+    )
+    return result.scalars().all()

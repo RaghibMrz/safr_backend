@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from .routers import users, auth # Relative import for users and auth routers
-
-
+from .routers import cities
+from .routers import rankings
 
 app = FastAPI(
     title="Safr API",
@@ -11,6 +11,10 @@ app = FastAPI(
 
 app.include_router(auth.router) # Handles /token
 app.include_router(users.router) # Handles /users/
+app.include_router(cities.router)  # Handles /cities/
+app.include_router(rankings.router) # Handles /rankings/
+
+
 
 
 @app.get("/")
@@ -28,3 +32,7 @@ async def health_check():
     """
     return {"status": "ok"}
  
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    print("Safr API shutting down...")
