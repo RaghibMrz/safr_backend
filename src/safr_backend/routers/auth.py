@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
+from datetime import timedelta
 
 from .. import crud, schemas, security
 from ..database import get_db
@@ -31,7 +32,7 @@ async def login_for_access_token(
     
     # ACCESS_TOKEN_EXPIRE_MINUTES is handled in security.create_access_token
     # If you wanted to override it here for some reason, you could calculate a timedelta
-    # access_token_expires = timedelta(minutes=security.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token_expires = timedelta(minutes=security.ACCESS_TOKEN_EXPIRE_MINUTES)
     
     access_token = security.create_access_token(
         data={"sub": user.username} # "sub" is a standard JWT claim for the subject (user)

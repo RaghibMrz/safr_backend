@@ -74,3 +74,15 @@ curl -X DELETE "http://127.0.0.1:8000/rankings/cities/1006" \
  -H "accept: application/json" \
  -H "Authorization: Bearer YOUR_TOKEN"
 ```
+
+## Docker
+
+```bash
+poetry run docker-compose up --build
+```
+
+## Run backend
+
+```bash
+poetry run uvicorn src.safr_backend.main:app --reload --host 0.0.0.0 --port 8000
+```
