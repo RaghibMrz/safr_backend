@@ -17,7 +17,7 @@ from sqlalchemy.future import select # For SQLAlchemy 1.4+ style select
 # --- Configuration ---
 GEONAMES_URL = "http://download.geonames.org/export/dump/cities15000.zip"
 CITIES_FILE_IN_ZIP = "cities15000.txt"
-NUMBER_OF_CITIES_TO_SEED = 15000  # Adjust as needed
+NUMBER_OF_CITIES_TO_SEED = 15000
 
 # --- Database Setup ---
 # Load environment variables from .env file in the project root

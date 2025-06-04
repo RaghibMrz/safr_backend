@@ -15,7 +15,7 @@ router = APIRouter(
 @router.get("/", response_model=List[schemas.CityDisplay])
 async def read_cities(
     skip: int = 0,
-    limit: int = 100, # Default to 100 cities, can be adjusted
+    limit: int = 100,
     db: AsyncSession = Depends(get_db)
 ):
     """
