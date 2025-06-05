@@ -11,13 +11,31 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
 from safr_backend.models import Base
 from dotenv import load_dotenv
 
-load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
-RAW_DATABASE_URL = os.getenv("DATABASE_URL")
-if RAW_DATABASE_URL is None:
-    raise ValueError("DATABASE_URL not found in .env file")
-ALEMBIC_DATABASE_URL = RAW_DATABASE_URL.replace("postgresql+asyncpg", "postgresql")
+# Load .env only in development
+if not os.getenv("GOOGLE_CLOUD_PROJECT"):
+    load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
+# Get database URL - either from env var or construct from individual components
+def get_database_url():
+    # First try the original DATABASE_URL (for local development)
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        # Convert async URL to sync for Alembic
+        return database_url.replace("postgresql+asyncpg", "postgresql")
+    
+    # If not found, construct from individual components (for GCP)
+    if os.getenv("GOOGLE_CLOUD_PROJECT"):
+        db_user = os.getenv("DB_USER")
+        db_pass = os.getenv("DB_PASS")
+        db_name = os.getenv("DB_NAME")
+        connection_name = os.getenv("CLOUD_SQL_CONNECTION_NAME")
+        
+        if all([db_user, db_pass, db_name, connection_name]):
+            return f"postgresql://{db_user}:{db_pass}@/{db_name}?host=/cloudsql/{connection_name}"
+    
+    raise ValueError("Database configuration not found. Set either DATABASE_URL or GCP database environment variables.")
 
+ALEMBIC_DATABASE_URL = get_database_url()
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -52,7 +70,7 @@ def run_migrations_offline() -> None:
     script output.
 
     """
-    url = config.get_main_option("sqlalchemy.url")
+    url = ALEMBIC_DATABASE_URL
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -72,7 +90,7 @@ def run_migrations_online() -> None:
 
     """
     if ALEMBIC_DATABASE_URL is None:
-        raise ValueError("DATABASE_URL is not set. Check .env file and database.py.")
+        raise ValueError("Database URL is not set. Check environment variables and database configuration.")
 
     configuration = config.get_section(config.config_ini_section)
     configuration['sqlalchemy.url'] = ALEMBIC_DATABASE_URL
@@ -82,7 +100,6 @@ def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
-
 
     with connectable.connect() as connection:
         context.configure(

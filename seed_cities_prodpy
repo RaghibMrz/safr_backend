@@ -1,0 +1,113 @@
+import asyncio
+import csv
+import io
+import os
+import zipfile
+from pathlib import Path
+
+import requests
+from sqlalchemy import create_engine, Column, Integer, String, Float, text
+from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.future import select
+
+# Configuration
+GEONAMES_URL = "http://download.geonames.org/export/dump/cities15000.zip"
+CITIES_FILE_IN_ZIP = "cities15000.txt"
+NUMBER_OF_CITIES_TO_SEED = 15000
+
+# Database setup - use sync connection
+DATABASE_URL = "postgresql://postgres:MeinYahanSafrKarKeAayiHoon@127.0.0.1:5432/safr"
+engine = create_engine(DATABASE_URL, echo=False)
+SessionLocal = sessionmaker(bind=engine)
+
+# Simple City model
+Base = declarative_base()
+
+class City(Base):
+    __tablename__ = "cities"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False, index=True)
+    country = Column(String, nullable=False, index=True)
+    geoname_id = Column(String, unique=True, index=True, nullable=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+
+def download_and_extract_data():
+    print(f"Downloading city data from {GEONAMES_URL}...")
+    try:
+        response = requests.get(GEONAMES_URL, stream=True)
+        response.raise_for_status()
+        
+        with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+            with zf.open(CITIES_FILE_IN_ZIP) as city_file:
+                city_data_bytes = city_file.read()
+                city_data_text = city_data_bytes.decode('utf-8')
+                csv_reader = csv.reader(io.StringIO(city_data_text), delimiter='\t')
+                cities = []
+                for row in csv_reader:
+                    if len(row) >= 15:
+                        cities.append({
+                            "geoname_id": row[0],
+                            "name": row[1],
+                            "latitude": float(row[4]),
+                            "longitude": float(row[5]),
+                            "country_code": row[8],
+                            "population": int(row[14]) if row[14] else 0,
+                        })
+                print(f"Successfully extracted {len(cities)} cities from the archive.")
+                return cities
+    except Exception as e:
+        print(f"Error downloading data: {e}")
+        return []
+
+def seed_cities_to_db(cities_data):
+    if not cities_data:
+        print("No city data to seed.")
+        return
+
+    sorted_cities = sorted(cities_data, key=lambda x: x.get("population", 0), reverse=True)
+    cities_to_seed = sorted_cities[:NUMBER_OF_CITIES_TO_SEED]
+    
+    print(f"Preparing to seed {len(cities_to_seed)} cities...")
+
+    with SessionLocal() as session:
+        # Check existing cities using proper SQLAlchemy syntax
+        result = session.execute(text("SELECT geoname_id FROM cities"))
+        existing_geoname_ids = set(row[0] for row in result.fetchall())
+        print(f"Found {len(existing_geoname_ids)} existing cities.")
+
+        new_cities_count = 0
+        for city_data in cities_to_seed:
+            if city_data["geoname_id"] in existing_geoname_ids:
+                continue
+
+            city = City(
+                name=city_data["name"],
+                country=city_data["country_code"],
+                latitude=city_data["latitude"],
+                longitude=city_data["longitude"],
+                geoname_id=city_data["geoname_id"]
+            )
+            session.add(city)
+            new_cities_count += 1
+            existing_geoname_ids.add(city_data["geoname_id"])
+
+        if new_cities_count > 0:
+            try:
+                session.commit()
+                print(f"Successfully seeded {new_cities_count} new cities.")
+            except Exception as e:
+                session.rollback()
+                print(f"Error seeding cities: {e}")
+        else:
+            print("No new cities to seed.")
+
+def main():
+    print("Starting city seeding process...")
+    cities_data = download_and_extract_data()
+    if cities_data:
+        seed_cities_to_db(cities_data)
+    print("City seeding process finished.")
+
+if __name__ == "__main__":
+    main()

@@ -4,20 +4,30 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-# Make sure your .env file is in the project root directory (safr_backend/)
-load_dotenv()
+if not os.getenv("GOOGLE_CLOUD_PROJECT"):
+    load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+
+def get_database_url():
+    if os.getenv("GOOGLE_CLOUD_PROJECT"):
+        # Production: Cloud SQL
+        db_user = os.getenv("DB_USER")
+        db_pass = os.getenv("DB_PASS")
+        db_name = os.getenv("DB_NAME")
+        connection_name = os.getenv("CLOUD_SQL_CONNECTION_NAME")
+        
+        return f"postgresql+asyncpg://{db_user}:{db_pass}@/{db_name}?host=/cloudsql/{connection_name}"
+    else:
+        # Development: local PostgreSQL
+        return os.getenv("DATABASE_URL")
+
+DATABASE_URL = get_database_url()
 
 if DATABASE_URL is None:
-    raise ValueError("DATABASE_URL environment variable not set. Please create a .env file in the project root.")
+    raise ValueError("Database configuration missing")
 
-# Create an asynchronous engine
-engine = create_async_engine(DATABASE_URL, echo=True) # echo=True for logging SQL, can be removed in production
+engine = create_async_engine(DATABASE_URL, echo=False)
 
-# Create a sessionmaker for asynchronous sessions
-# expire_on_commit=False is often useful with FastAPI's dependency injection
 AsyncSessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,
@@ -26,17 +36,15 @@ AsyncSessionLocal = sessionmaker(
     expire_on_commit=False,
 )
 
-# Base class for SQLAlchemy models
 Base = declarative_base()
 
-# Dependency to get a DB session
 async def get_db():
     async with AsyncSessionLocal() as session:
         try:
             yield session
-            await session.commit() # Commit transactions that were successful
+            await session.commit()
         except:
-            await session.rollback() # Rollback in case of an error
+            await session.rollback()
             raise
         finally:
             await session.close()
