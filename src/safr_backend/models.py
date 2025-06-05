@@ -1,22 +1,27 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, UniqueConstraint, Index, func
 from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+from sqlalchemy.sql import func as sql_func
 from .database import Base
 
 class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True, index=True, nullable=False)
+    username = Column(String, nullable=False, index=True)  # Removed unique=True from here
     email = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=sql_func.now())
 
     # Future fields you mentioned (can be added later via migrations):
     # travel_style_tags = Column(ARRAY(String)) # If using PostgreSQL ARRAY type
     # preferred_climate = Column(String)
 
     rankings = relationship("UserCityRanking", back_populates="user")
+
+    __table_args__ = (
+        # Create a unique constraint on the lowercase version of username
+        Index('ix_username_lower_unique', func.lower(username), unique=True),
+    )
 
 class City(Base):
     __tablename__ = "cities"
@@ -40,8 +45,8 @@ class UserCityRanking(Base):
     personal_score = Column(Float, nullable=False) # User's subjective ranking score
     objective_score = Column(Float, nullable=True) # Calculated: city data + user preferences. Nullable if not always immediately calculated/available.
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=sql_func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=sql_func.now(), onupdate=sql_func.now())
 
     # Future fields specific to this ranking/visit:
     # notes = Column(Text)
