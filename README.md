@@ -113,6 +113,20 @@ gcloud run deploy safr-backend \
   --set-secrets "DB_PASS=db-password:latest,SECRET_KEY=jwt-secret:latest"
 ```
 
+Or one liner:
+
+```bash
+cd safr_backend && gcloud builds submit --tag gcr.io/$(gcloud config get-value project)/safr-backend && gcloud run deploy safr-backend --image gcr.io/$(gcloud config get-value project)/safr-backend --region europe-west2
+```
+
+To update secrets:
+
+```bash
+# If you change passwords or secrets:
+echo -n "new-password" | gcloud secrets versions add db-password --data-file=-
+echo -n "new-jwt-secret" | gcloud secrets versions add jwt-secret --data-file=-
+```
+
 Test the deployment:
 
 ```bash
@@ -125,4 +139,14 @@ curl $API_URL/health
 
 # Run request which requires prod db access:
 curl "$API_URL/cities/" | head -20
+```
+
+Troubleshooting:
+
+```bash
+# Check logs if something fails
+gcloud run services logs read safr-backend --region europe-west2 --limit 50
+
+# Check service status
+gcloud run services describe safr-backend --region europe-west2
 ```
