@@ -1,6 +1,6 @@
 import os
 from fastapi import FastAPI
-from .routers import users, auth # Relative import for users and auth routers
+from .routers import users, auth
 from .routers import cities
 from .routers import rankings
 from fastapi.middleware.cors import CORSMiddleware

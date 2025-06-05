@@ -2,7 +2,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload # For eager loading related City
-from sqlalchemy import func
 from typing import List, Optional
 
 from . import models
@@ -27,7 +26,7 @@ async def get_user_by_email(db: AsyncSession, email: str) -> models.User | None:
 
 async def get_user_by_username(db: AsyncSession, username: str) -> models.User | None:
     """
-    Retrieves a user from the database by their username (case-insensitive).
+    Retrieves a user from the database by their username.
 
     Args:
         db: The asynchronous database session.
@@ -36,9 +35,7 @@ async def get_user_by_username(db: AsyncSession, username: str) -> models.User |
     Returns:
         The User model instance if found, otherwise None.
     """
-    result = await db.execute(
-        select(models.User).filter(func.lower(models.User.username) == func.lower(username))
-    )
+    result = await db.execute(select(models.User).filter(models.User.username == username))
     return result.scalars().first()
 
 async def create_user(db: AsyncSession, user: schemas.UserCreate) -> models.User:
@@ -54,7 +51,7 @@ async def create_user(db: AsyncSession, user: schemas.UserCreate) -> models.User
     """
     hashed_password = get_password_hash(user.password)
     db_user = models.User(
-        username=user.username,  # Store as provided, but lookups will be case-insensitive
+        username=user.username,
         email=user.email,
         hashed_password=hashed_password
     )
@@ -65,7 +62,7 @@ async def create_user(db: AsyncSession, user: schemas.UserCreate) -> models.User
 
 async def authenticate_user(db: AsyncSession, username: str, password: str) -> models.User | None:
     """
-    Authenticates a user by checking username and password (case-insensitive username).
+    Authenticates a user by checking username and password.
 
     Args:
         db: The asynchronous database session.
