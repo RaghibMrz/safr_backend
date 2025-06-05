@@ -86,3 +86,43 @@ poetry run docker-compose up --build
 ```bash
 poetry run uvicorn src.safr_backend.main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+# To Deploy:
+
+Build and push docker image to Google Container Registry
+
+```bash
+gcloud builds submit --tag gcr.io/$(gcloud config get-value project)/safr-backend
+```
+
+Deploy to cloud run
+
+```bash
+gcloud run deploy safr-backend \
+  --image gcr.io/$(gcloud config get-value project)/safr-backend \
+  --platform managed \
+  --region europe-west2 \
+  --allow-unauthenticated \
+  --port 8080 \
+  --memory 512Mi \
+  --cpu 1 \
+  --min-instances 0 \
+  --max-instances 3 \
+  --add-cloudsql-instances $(gcloud sql instances describe safr-db --format="value(connectionName)") \
+  --set-env-vars "GOOGLE_CLOUD_PROJECT=$(gcloud config get-value project),DB_USER=postgres,DB_NAME=safr,CLOUD_SQL_CONNECTION_NAME=$(gcloud sql instances describe safr-db --format='value(connectionName)'),ALGORITHM=HS256,ACCESS_TOKEN_EXPIRE_MINUTES=30" \
+  --set-secrets "DB_PASS=db-password:latest,SECRET_KEY=jwt-secret:latest"
+```
+
+Test the deployment:
+
+```bash
+# Get the URL and test
+export API_URL=$(gcloud run services describe safr-backend --region europe-west2 --format "value(status.url)")
+echo "API deployed at: $API_URL"
+
+# Quick health check
+curl $API_URL/health
+
+# Run request which requires prod db access:
+curl "$API_URL/cities/" | head -20
+```
