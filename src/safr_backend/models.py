@@ -23,6 +23,20 @@ class User(Base):
         Index('ix_username_lower_unique', func.lower(username), unique=True),
     )
 
+class CityAttribute(Base):
+    __tablename__ = "city_attributes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    city_id = Column(Integer, ForeignKey("cities.id"), nullable=False, index=True)
+    attribute_name = Column(String, nullable=False, index=True)
+    normalized_score = Column(Float, nullable=False)
+
+    city = relationship("City", back_populates="attributes")
+
+    __table_args__ = (
+        UniqueConstraint('city_id', 'attribute_name', name='uq_city_attribute'),
+    )
+
 class City(Base):
     __tablename__ = "cities"
 
