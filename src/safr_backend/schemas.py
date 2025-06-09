@@ -57,19 +57,21 @@ class TokenData(BaseModel):
 class CityBase(BaseModel):
     """Base schema for city attributes."""
     name: str
-    country: str
+    country_code: str
     latitude: Optional[float] = None
     longitude: Optional[float] = None
-    geoname_id: Optional[str] = None # Or int, depending on your data source
+    geoname_id: Optional[str] = None
+    country_name: Optional[str] = None
 
     class Config:
         json_schema_extra = {
             "example": {
                 "name": "London",
-                "country": "United Kingdom",
+                "country_code": "UK",
                 "latitude": 51.5074,
                 "longitude": 0.1278,
-                "geoname_id": "2643743"
+                "geoname_id": "2643743",
+                "country_name": "United Kingdom"
             }
         }
 
@@ -83,10 +85,11 @@ class CityDisplay(CityBase):
             "example": {
                 "id": 1,
                 "name": "London",
-                "country": "United Kingdom",
+                "country_code": "UK",
                 "latitude": 51.5074,
                 "longitude": 0.1278,
-                "geoname_id": "2643743"
+                "geoname_id": "2643743",
+                "country_name": "United Kingdom"
             }
         }
 
@@ -130,10 +133,11 @@ class UserCityRankingDisplay(BaseModel):
                 "city": {
                     "id": 1,
                     "name": "London",
-                    "country": "United Kingdom",
+                    "country_code": "United Kingdom",
                     "latitude": 51.5074,
                     "longitude": 0.1278,
-                    "geoname_id": "2643743"
+                    "geoname_id": "2643743",
+                    "country_name": "United Kingdom"
                 }
             }
         }

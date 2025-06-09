@@ -23,7 +23,9 @@ dependencies = [
     "pydantic[email] (>=2.11.4,<3.0.0)",
     "python-multipart (>=0.0.20,<0.0.21)",
     "greenlet (>=3.2.1,<4.0.0)",
-    "requests (>=2.32.3,<3.0.0)"
+    "requests (>=2.32.3,<3.0.0)",
+    "unidecode (>=1.4.0,<2.0.0)",
+    "pycountry (>=24.6.1,<25.0.0)"
 ]
 
 [tool.poetry]

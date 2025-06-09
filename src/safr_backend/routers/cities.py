@@ -2,9 +2,10 @@
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Optional
 
-from .. import crud, schemas, models # Use .. for relative imports
-from ..database import get_db # Use .. for relative imports
+from .. import crud, schemas
+from ..database import get_db
 
 router = APIRouter(
     prefix="/cities",  # All routes in this router will start with /cities
@@ -38,3 +39,15 @@ async def read_city(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="City not found")
     return db_city
 
+
+@router.get("/search/", response_model=List[schemas.CityDisplay])
+async def search_cities(
+    query: str,
+    country: Optional[str] = None,
+    limit: int = 10,
+    db: AsyncSession = Depends(get_db)
+):
+    cities = await crud.search_cities_by_name(
+        db, search_term=query, country_name=country, limit=limit
+    )
+    return cities

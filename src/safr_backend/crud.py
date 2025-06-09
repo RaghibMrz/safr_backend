@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload # For eager loading related City
 from typing import List, Optional
+from unidecode import unidecode
 
 from . import models
 from . import schemas
@@ -196,4 +197,24 @@ async def get_user_rankings_with_details(
         .offset(skip)
         .limit(limit)
     )
+    return result.scalars().all()
+
+async def search_cities_by_name(
+    db: AsyncSession,
+    search_term: str,
+    country_name: Optional[str] = None,
+    limit: int = 10
+) -> List[models.City]:
+    
+    normalized_term = unidecode(search_term.lower())
+    stmt = select(models.City)
+
+    if search_term:
+        stmt = stmt.where(models.City.name_normalized.like(f"%{normalized_term}%"))
+
+    if country_name:
+        stmt = stmt.where(models.City.country_name.ilike(f"%{country_name}%"))
+
+    stmt = stmt.limit(limit)
+    result = await db.execute(stmt)
     return result.scalars().all()
