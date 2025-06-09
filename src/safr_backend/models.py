@@ -23,6 +23,22 @@ class User(Base):
         Index('ix_username_lower_unique', func.lower(username), unique=True),
     )
 
+class City(Base):
+    __tablename__ = "cities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False, index=True)
+    name_normalized = Column(String, nullable=True, index=True)
+    country_code = Column(String, nullable=True, index=True)
+    country_name = Column(String, nullable=True, index=True)
+    geoname_id = Column(String, unique=True, index=True, nullable=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+
+    attributes = relationship("CityAttribute", back_populates="city")
+    user_rankings = relationship("UserCityRanking", back_populates="city")
+
+
 class CityAttribute(Base):
     __tablename__ = "city_attributes"
 
@@ -36,18 +52,6 @@ class CityAttribute(Base):
     __table_args__ = (
         UniqueConstraint('city_id', 'attribute_name', name='uq_city_attribute'),
     )
-
-class City(Base):
-    __tablename__ = "cities"
-
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False, index=True)
-    country = Column(String, nullable=False, index=True)
-    geoname_id = Column(String, unique=True, index=True, nullable=True) # Or Integer if preferred
-    latitude = Column(Float, nullable=True)
-    longitude = Column(Float, nullable=True)
-
-    user_rankings = relationship("UserCityRanking", back_populates="city")
 
 class UserCityRanking(Base):
     __tablename__ = "user_city_rankings"
