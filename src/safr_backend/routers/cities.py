@@ -2,9 +2,10 @@
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Optional
 
-from .. import crud, schemas, models # Use .. for relative imports
-from ..database import get_db # Use .. for relative imports
+from .. import crud, schemas
+from ..database import get_db
 
 router = APIRouter(
     prefix="/cities",  # All routes in this router will start with /cities
