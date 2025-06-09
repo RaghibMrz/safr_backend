@@ -58,7 +58,7 @@ async def download_and_extract_data():
                         is_capital = feature_code in ['PPLC', 'PPLA']
                         # is_significant_city = feature_code in ['PPL', 'PPLX'] and population > 25000
                         
-                        if is_capital or population > 5000:
+                        if is_capital or population > 10000:
                             cities.append({
                                 "geoname_id": row[0], "name": row[1],
                                 "latitude": float(row[4]), "longitude": float(row[5]),

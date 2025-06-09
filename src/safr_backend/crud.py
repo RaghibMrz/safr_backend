@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload # For eager loading related City
 from typing import List, Optional
+from unidecode import unidecode
 
 from . import models
 from . import schemas
