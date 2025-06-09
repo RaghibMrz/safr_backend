@@ -144,6 +144,10 @@ curl "$API_URL/cities/" | head -20
 Troubleshooting:
 
 ```bash
+# Make sure you run the migrations and seed script (if required) before deploying:
+DATABASE_URL=... poetry run alembic upgrade head
+DATABASE_URL=... poetry run python scripts/seed_cities.py
+
 # Check logs if something fails
 gcloud run services logs read safr-backend --region europe-west2 --limit 50
 
