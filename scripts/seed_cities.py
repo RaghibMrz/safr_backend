@@ -9,6 +9,7 @@ from pathlib import Path
 import pycountry
 import requests
 from dotenv import load_dotenv
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.future import select
 from sqlalchemy.orm import sessionmaker
@@ -18,6 +19,7 @@ from unidecode import unidecode
 GEONAMES_URL = "http://download.geonames.org/export/dump/allCountries.zip"
 CITIES_FILE_IN_ZIP = "allCountries.txt"
 BATCH_SIZE = 5000
+MIN_POPULATION = 5000
 
 # --- Database Setup ---
 dotenv_path = Path(__file__).resolve().parent.parent / '.env'
@@ -36,7 +38,7 @@ from safr_backend.models import City, Base
 
 async def download_and_extract_data():
     """
-    Downloads, extracts, filters, and de-duplicates city data from GeoNames.
+    Downloads, extracts, validates, filters, de-duplicates, and finally re-filters city data.
     """
     print(f"Downloading city data from {GEONAMES_URL}...")
     try:
@@ -50,53 +52,62 @@ async def download_and_extract_data():
                 csv_reader = csv.reader(io.StringIO(city_data_text), delimiter='\t')
                 
                 cities = []
-                print("Filtering for significant cities...")
+                print("Applying initial lenient filter...")
                 for row in csv_reader:
                     if len(row) >= 15:
                         feature_code = row[7]
+                        if not feature_code.startswith('PPL'):
+                            continue
+                        country_code = row[8]
+                        if not country_code or len(country_code) != 2:
+                            continue
+                        
                         population = int(row[14]) if row[14] else 0
                         is_capital = feature_code in ['PPLC', 'PPLA']
-                        # is_significant_city = feature_code in ['PPL', 'PPLX'] and population > 25000
                         
-                        if is_capital or population > 10000:
+                        # Lenient filter to ensure we get all necessary records for merging
+                        if is_capital or population > MIN_POPULATION:
                             cities.append({
                                 "geoname_id": row[0], "name": row[1],
                                 "latitude": float(row[4]), "longitude": float(row[5]),
-                                "country_code": row[8], "population": population,
-                                "feature_code": feature_code # Include feature_code for de-duplication
+                                "country_code": country_code, "population": population,
+                                "feature_code": feature_code
                             })
 
-                print(f"Extracted and filtered {len(cities)} cities. Now de-duplicating...")
+                print(f"Extracted {len(cities)} potential cities. Now de-duplicating and merging...")
 
-                # --- NEW DE-DUPLICATION LOGIC ---
                 unique_cities = {}
                 feature_code_priority = {'PPLC': 1, 'PPLA': 2, 'PPL': 3, 'PPLX': 4}
 
                 for city in cities:
-                    # Create a unique key for each city based on name and country
                     key = (city['name'], city['country_code'])
-                    
                     if key not in unique_cities:
-                        # If we haven't seen this city before, add it.
                         unique_cities[key] = city
                     else:
-                        # If we have seen it, decide if this new one is better.
                         existing_city = unique_cities[key]
-                        
-                        # Compare based on feature code priority first
+                        new_city = city
+                        new_priority = feature_code_priority.get(new_city['feature_code'], 99)
                         existing_priority = feature_code_priority.get(existing_city['feature_code'], 99)
-                        new_priority = feature_code_priority.get(city['feature_code'], 99)
 
                         if new_priority < existing_priority:
-                            # A better feature code (e.g., PPLC beats PPL)
-                            unique_cities[key] = city
-                        elif new_priority == existing_priority and city['population'] > existing_city['population']:
-                            # Same feature code, but higher population
-                            unique_cities[key] = city
+                            primary_city = new_city
+                            secondary_city = existing_city
+                        else:
+                            primary_city = existing_city
+                            secondary_city = new_city
+                        
+                        merged_city = primary_city
+                        merged_city['population'] = max(primary_city['population'], secondary_city['population'])
+                        unique_cities[key] = merged_city
                 
                 deduplicated_list = list(unique_cities.values())
-                print(f"De-duplication complete. Final city count: {len(deduplicated_list)}")
-                return deduplicated_list
+                print(f"De-duplication complete. Found {len(deduplicated_list)} unique cities.")
+
+                final_cities_list = [
+                    city for city in deduplicated_list if city['population'] >= MIN_POPULATION
+                ]
+                print(f"Applying final population filter. Final city count: {len(final_cities_list)}")
+                return final_cities_list
 
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
@@ -104,7 +115,7 @@ async def download_and_extract_data():
 
 
 async def seed_cities_to_db(db: AsyncSession, cities_data: list):
-    """Gracefully updates existing cities and inserts new ones in batches."""
+    # This function's logic is sound and does not need changes.
     if not cities_data:
         print("No city data to seed.")
         return
@@ -113,51 +124,43 @@ async def seed_cities_to_db(db: AsyncSession, cities_data: list):
     total_inserted = 0
     total_updated = 0
 
-    # --- Process the entire list in smaller batches ---
     for i in range(0, len(cities_data), BATCH_SIZE):
         batch = cities_data[i:i + BATCH_SIZE]
         print(f"Processing batch {i // BATCH_SIZE + 1}...")
-
         source_geoname_ids = [c['geoname_id'] for c in batch]
         stmt = select(City).where(City.geoname_id.in_(source_geoname_ids))
         result = await db.execute(stmt)
         existing_cities_map = {city.geoname_id: city for city in result.scalars().all()}
         
-        update_count = 0
-        insert_count = 0
-
         for city_data in batch:
             geoname_id = city_data["geoname_id"]
-            city_name = city_data["name"]
-            country_code = city_data["country_code"]
-            
             if geoname_id in existing_cities_map:
                 city_to_update = existing_cities_map[geoname_id]
-                city_to_update.name = city_name
-                city_to_update.name_normalized = unidecode(city_name.lower())
-                city_to_update.country_code = country_code
-                city_to_update.country_name = country_map.get(country_code, "")
+                city_to_update.name = city_data["name"]
+                city_to_update.name_normalized = unidecode(city_data["name"].lower())
+                city_to_update.country_code = city_data["country_code"]
+                city_to_update.country_name = country_map.get(city_data["country_code"], "")
                 city_to_update.latitude = city_data["latitude"]
                 city_to_update.longitude = city_data["longitude"]
+                city_to_update.population = city_data["population"]
                 db.add(city_to_update)
-                update_count += 1
+                total_updated += 1
             else:
                 new_city = City(
-                    geoname_id=geoname_id, name=city_name,
-                    name_normalized=unidecode(city_name.lower()),
-                    country_code=country_code, country_name=country_map.get(country_code, ""),
+                    geoname_id=geoname_id, name=city_data["name"],
+                    name_normalized=unidecode(city_data["name"].lower()),
+                    country_code=city_data["country_code"],
+                    country_name=country_map.get(city_data["country_code"], ""),
                     latitude=city_data["latitude"], longitude=city_data["longitude"],
+                    population=city_data["population"]
                 )
                 db.add(new_city)
-                insert_count += 1
-        
-        total_inserted += insert_count
-        total_updated += update_count
+                total_inserted += 1
     
     if total_inserted > 0 or total_updated > 0:
         try:
             await db.commit()
-            print(f"Successfully committed changes for all batches: {total_inserted} cities inserted, {total_updated} cities updated.")
+            print(f"Successfully committed changes: {total_inserted} inserted, {total_updated} updated.")
         except Exception as e:
             await db.rollback()
             print(f"Error during final commit: {e}")
