@@ -2,6 +2,7 @@
 import asyncio
 import httpx
 import os
+import random
 from pathlib import Path
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -13,11 +14,25 @@ from safr_backend.models import City, CityAttribute
 from safr_backend.constants import CityAttributeName
 
 # --- Configuration ---
-OVERPASS_API_URL = "https://overpass.kumi.systems/api/interpreter" # Using the more lenient server
+OVERPASS_API_ENDPOINTS = [
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass-api.de/api/interpreter"
+]
+# This is the query for a SINGLE city's greenery count.
+OVERPASS_QUERY_TEMPLATE = """
+[out:json][timeout:60];
+(
+  way[leisure~"^(park|garden|nature_reserve|recreation_ground|village_green)$"](around:10000,{lat},{lon});
+  relation[leisure~"^(park|garden|nature_reserve|recreation_ground|village_green)$"](around:10000,{lat},{lon});
+  way[landuse~"^(forest|meadow)$"](around:10000,{lat},{lon});
+  relation[landuse~"^(forest|meadow)$"](around:10000,{lat},{lon});
+  way[natural~"^(wood|grassland)$"](around:10000,{lat},{lon});
+  relation[natural~"^(wood|grassland)$"](around:10000,{lat},{lon});
+);
+out count;
+"""
 PROGRESS_FILE = Path(__file__).parent / "urban_greenery_progress.log"
-# --- We can now process a much larger batch of cities per API call ---
-CITY_BATCH_SIZE = 250
-API_SLEEP_INTERVAL = 5 # Seconds to wait between large API calls
+API_REQUEST_INTERVAL = 1.1
 
 # --- Database Setup ---
 dotenv_path = Path(__file__).resolve().parent.parent.parent / '.env'
@@ -35,13 +50,12 @@ def load_processed_cities():
     with open(PROGRESS_FILE, 'r') as f:
         return {line.strip() for line in f}
 
-def log_processed_batch(city_ids):
+def log_processed_city(geoname_id: str):
     with open(PROGRESS_FILE, 'a') as f:
-        for city_id in city_ids:
-            f.write(f"{city_id}\n")
+        f.write(f"{geoname_id}\n")
 
 async def fetch_and_save_scores(session: AsyncSession):
-    print("--- Fetching and saving raw urban greenery scores ---")
+    print("--- Fetching and saving raw urban greenery scores (sequentially) ---")
     
     processed_ids = load_processed_cities()
     print(f"Found {len(processed_ids)} already processed cities. Resuming...")
@@ -49,89 +63,96 @@ async def fetch_and_save_scores(session: AsyncSession):
     stmt = select(City).where(City.geoname_id.notin_(processed_ids))
     result = await session.execute(stmt)
     cities_to_process = result.scalars().all()
-    print(f"Found {len(cities_to_process)} new cities to process.")
+    total_cities = len(cities_to_process)
+    print(f"Found {total_cities} new cities to process.")
 
     if not cities_to_process:
-        print("All cities have been processed.")
         return
 
     attribute_name = CityAttributeName.URBAN_GREENERY
     
-    async with httpx.AsyncClient(timeout=180.0) as client: # Increase timeout for larger queries
-        for i in range(0, len(cities_to_process), CITY_BATCH_SIZE):
-            batch = cities_to_process[i:i + CITY_BATCH_SIZE]
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        for i, city in enumerate(cities_to_process):
+            print(f"Processing city {i + 1} of {total_cities}: {city.name} ({city.geoname_id})")
             
-            # --- Dynamically build one large query for the entire batch ---
-            query_parts = []
-            for city in batch:
-                # Assign a unique variable name for each city's results
-                query_parts.append(f"""
-                (
-                  node[leisure=park](around:10000,{city.latitude},{city.longitude});
-                  way[leisure=park](around:10000,{city.latitude},{city.longitude});
-                )->.set_{city.geoname_id};
-                make count val=set_{city.geoname_id}.count(), geoname_id="{city.geoname_id}";
-                out;
-                """)
-            
-            full_query = f"[out:json];({';'.join(query_parts)});"
-            # -----------------------------------------------------------
-            
-            print(f"Processing batch {i//CITY_BATCH_SIZE + 1} of {len(cities_to_process)//CITY_BATCH_SIZE + 1} ({len(batch)} cities)...")
+            query = OVERPASS_QUERY_TEMPLATE.format(lat=city.latitude, lon=city.longitude)
             
             try:
-                response = await client.post(OVERPASS_API_URL, data=full_query)
+                endpoint_url = random.choice(OVERPASS_API_ENDPOINTS)
+                response = await client.post(endpoint_url, data=query)
                 response.raise_for_status()
                 data = response.json()
 
-                # --- Parse the combined results ---
-                scores = {elem['tags']['geoname_id']: int(elem['tags']['total']) for elem in data.get('elements', [])}
-                
-                # --- Upsert the results for the batch ---
-                batch_city_ids = [c.id for c in batch]
-                existing_attrs_stmt = select(CityAttribute).where(
-                    CityAttribute.attribute_name == attribute_name,
-                    CityAttribute.city_id.in_(batch_city_ids)
-                )
-                existing_attrs_result = await session.execute(existing_attrs_stmt)
-                existing_attrs_map = {attr.city_id: attr for attr in existing_attrs_result.scalars().all()}
+                raw_score = int(data.get("elements", [{}])[0].get("tags", {}).get("total", 0))
+                print(f"  SUCCESS: Found {raw_score} green spaces for {city.name}")
 
-                for city in batch:
-                    raw_score = scores.get(city.geoname_id, 0) # Default to 0 if not in results
-                    
-                    if city.id in existing_attrs_map:
-                        attr = existing_attrs_map[city.id]
-                        attr.raw_value = raw_score
-                    else:
-                        attr = CityAttribute(
-                            city_id=city.id, attribute_name=attribute_name,
-                            raw_value=raw_score, normalized_score=0
-                        )
-                    session.add(attr)
+                stmt_existing = select(CityAttribute).where(CityAttribute.city_id == city.id, CityAttribute.attribute_name == attribute_name)
+                result_existing = await session.execute(stmt_existing)
+                attr = result_existing.scalars().first()
                 
+                if attr:
+                    attr.raw_value = raw_score
+                else:
+                    attr = CityAttribute(
+                        city_id=city.id, attribute_name=attribute_name,
+                        raw_value=raw_score, normalized_score=0
+                    )
+                session.add(attr)
                 await session.commit()
-                log_processed_batch([c.geoname_id for c in batch])
-                print(f"Batch successfully processed and committed.")
+                log_processed_city(city.geoname_id)
 
-            except httpx.HTTPStatusError as e:
-                print(f"HTTP ERROR for batch: {e.response.status_code} - {e.response.text}")
-                print("Skipping this batch and continuing...")
             except Exception as e:
-                print(f"An unexpected error occurred for batch: {e}")
-                print("Skipping this batch and continuing...")
-
-            print(f"Waiting {API_SLEEP_INTERVAL} seconds...")
-            await asyncio.sleep(API_SLEEP_INTERVAL)
+                print(f"  FAILURE: Could not process {city.name}. Error: {e}")
+            
+            # Wait before processing the next city to be polite to the public API
+            await asyncio.sleep(API_REQUEST_INTERVAL)
 
 async def normalize_all_scores(session: AsyncSession):
-    # This function remains the same as before
-    print("\n--- Normalizing all scores ---")
-    # ...
+    """Reads all raw scores from the DB, normalizes them, and saves the final score."""
+    print("\n--- Pass 2: Normalizing all scores ---")
+    
+    attribute_name = CityAttributeName.URBAN_GREENERY
+    
+    stmt = select(CityAttribute.raw_value).where(
+        CityAttribute.attribute_name == attribute_name,
+        CityAttribute.raw_value.isnot(None)
+    )
+    result = await session.execute(stmt)
+    raw_scores = result.scalars().all()
+
+    if not raw_scores or len(raw_scores) < 2:
+        print("Not enough raw scores found to normalize. At least 2 are required.")
+        return
+
+    min_score = min(raw_scores)
+    max_score = max(raw_scores)
+    print(f"Normalizing based on Min={min_score}, Max={max_score}")
+
+    if max_score == min_score:
+        print("All raw scores are the same. Setting normalized score to 0.5 for all.")
+    
+    all_attributes_stmt = select(CityAttribute).where(CityAttribute.attribute_name == attribute_name)
+    all_attributes_result = await session.execute(all_attributes_stmt)
+    
+    update_count = 0
+    for attr in all_attributes_result.scalars().all():
+        if attr.raw_value is not None:
+            if max_score > min_score:
+                attr.normalized_score = (attr.raw_value - min_score) / (max_score - min_score)
+            else:
+                attr.normalized_score = 0.5
+            session.add(attr)
+            update_count += 1
+        
+    await session.commit()
+    print(f"Successfully updated {update_count} attributes with normalized scores.")
+
 
 async def main():
+    """Main function to orchestrate the attribute update process."""
     async with AsyncSessionLocal() as session:
         await fetch_and_save_scores(session)
-        await normalize_all_scores(session)
+        await normalize_all_scores(session) 
 
 if __name__ == "__main__":
     asyncio.run(main())
