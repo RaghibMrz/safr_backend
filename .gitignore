@@ -137,3 +137,6 @@ logs/
 # If you have a specific local settings file not meant for commit
 local_settings.py
 config/local.py
+
+# Data files
+scripts/attributes/data/

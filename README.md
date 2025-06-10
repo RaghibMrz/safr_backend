@@ -154,3 +154,29 @@ gcloud run services logs read safr-backend --region europe-west2 --limit 50
 # Check service status
 gcloud run services describe safr-backend --region europe-west2
 ```
+
+Attributes:
+
+```bash
+poetry run python scripts/attributes/update_air_quality.py
+poetry run python scripts/attributes/update_urban_greenery.py
+```
+
+Air Quality:
+
+- uses the average of 1 years worth historic data from OpenWeather API to calculate the air quality index - from 10/06/2025 to 10/06/2024
+- unit of measurement of PM2.5 is micrograms per cubic meters (µg/m³)
+- normalized score is the min-max normalized air quality index
+- normalized score is inverted (lower is better)
+
+Internet Speed:
+
+- uses the average of last quarters median internet speed from Ookla API to calculate the internet speed index - (Q1 of 2025)
+- unit of measurement of internet speed is Mbps
+- normalized score is the min-max normalisation of the log-transformed internet speed index (log_score = ln(raw_score))
+- any column where raw_value is 0, is deemed to be a city for which data is not available and is assigned a normalized score of 0
+
+Urban Greenery:
+
+- uses the overpass.kumi open source API to calculate the urban greenery index using public green areas
+- normalized score is the min-max normalized urban greenery index
