@@ -1,38 +1,29 @@
 # scripts/attributes/update_city_area.py
+# FINAL IMPROVED VERSION WITH BETTER ESTIMATES
 import asyncio
 import httpx
 import os
 import random
-import json
 from pathlib import Path
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.future import select
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.engine import Engine
 from unidecode import unidecode
-from typing import Optional, Dict, List, Tuple, Union
+from typing import Optional, Dict, List, Tuple
 import time
 import numpy as np
-from shapely.geometry import shape, Point, Polygon, MultiPolygon, mapping
-from shapely.ops import transform, unary_union
-from shapely.validation import make_valid
-import pyproj
-from functools import partial
+from pyproj import Transformer
 import warnings
-warnings.filterwarnings('ignore', category=FutureWarning)
-warnings.filterwarnings('ignore', category=RuntimeWarning)
+warnings.filterwarnings('ignore')
 
-# --- App-specific Imports ---
 from safr_backend.models import City, CityAttribute
 from safr_backend.constants import CityAttributeName
 
 # --- Configuration ---
 OVERPASS_API_ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-    "https://z.overpass-api.de/api/interpreter",
-    "https://lz4.overpass-api.de/api/interpreter"
+    "https://overpass.kumi.systems/api/interpreter"
 ]
 PROGRESS_FILE = Path(__file__).parent / "city_area_progress.log"
 ERROR_LOG_FILE = Path(__file__).parent / "city_area_errors.log"
@@ -43,488 +34,467 @@ load_dotenv(dotenv_path=dotenv_path)
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL: 
     raise ValueError("DATABASE_URL not set.")
-
-engine: Engine = create_async_engine(DATABASE_URL, echo=False)
+engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+
+# Known city areas for calibration (in km²)
+KNOWN_CITY_AREAS = {
+    # Europe
+    "paris": 105,
+    "london": 1572,
+    "berlin": 891,
+    "madrid": 604,
+    "rome": 1285,
+    "amsterdam": 219,
+    "vienna": 414,
+    "brussels": 162,
+    "budapest": 525,
+    "warsaw": 517,
+    "barcelona": 101,
+    "munich": 310,
+    "milan": 182,
+    "prague": 496,
+    "stockholm": 188,
+    "athens": 412,
+    "lisbon": 100,
+    "dublin": 115,
+    "helsinki": 715,
+    "oslo": 454,
+    
+    # Asia
+    "tokyo": 2194,  # Tokyo Metropolis
+    "delhi": 1484,  # NCT Delhi
+    "shanghai": 6340,
+    "beijing": 16411,
+    "mumbai": 603,  # Greater Mumbai
+    "istanbul": 5343,
+    "karachi": 3780,
+    "dhaka": 306,  # Dhaka City Corp
+    "bangkok": 1568,
+    "seoul": 605,
+    "singapore": 734,
+    "jakarta": 664,
+    "manila": 42,  # City proper
+    "kolkata": 185,
+    "chennai": 426,
+    "bangalore": 741,
+    "hyderabad": 650,
+    "hong kong": 1106,
+    "taipei": 272,
+    "osaka": 223,
+    
+    # Americas
+    "new york": 784,  # 5 boroughs
+    "los angeles": 1302,
+    "chicago": 606,
+    "houston": 1700,
+    "phoenix": 1340,
+    "philadelphia": 347,
+    "san antonio": 1355,
+    "san diego": 964,
+    "dallas": 997,
+    "san jose": 469,
+    "austin": 828,
+    "san francisco": 121,
+    "seattle": 369,
+    "denver": 401,
+    "boston": 232,
+    "mexico city": 1495,
+    "sao paulo": 1521,
+    "buenos aires": 203,
+    "rio de janeiro": 1200,
+    "lima": 2672,
+    "bogota": 1775,
+    "santiago": 641,
+    "caracas": 777,
+    "toronto": 630,
+    "montreal": 365,
+    "vancouver": 115,
+    
+    # Africa
+    "cairo": 3085,
+    "lagos": 1171,  # Lagos City
+    "kinshasa": 9965,  # Province
+    "johannesburg": 1645,
+    "cape town": 2446,
+    "nairobi": 696,
+    "addis ababa": 527,
+    "dar es salaam": 1393,
+    "alexandria": 2679,
+    "casablanca": 384,
+    "accra": 225,
+    "algiers": 1190,
+    
+    # Oceania
+    "sydney": 12368,  # Greater Sydney
+    "melbourne": 9993,  # Greater Melbourne
+    "brisbane": 15842,
+    "perth": 6418,
+    "auckland": 1086,
+    "adelaide": 3258,
+    "wellington": 290,
+}
 
 # --- Helper Functions ---
 def load_processed_cities() -> set[str]:
-    """Loads the set of already processed geoname_ids from the progress log."""
     if not PROGRESS_FILE.exists(): 
         return set()
     with open(PROGRESS_FILE, 'r') as f:
         return {line.strip() for line in f if line.strip()}
 
 def log_processed_city(geoname_id: str):
-    """Appends a geoname_id to the progress log."""
     with open(PROGRESS_FILE, 'a') as f:
         f.write(f"{geoname_id}\n")
 
 def log_error(city_name: str, geoname_id: str, error: str):
-    """Logs errors to a separate error file for debugging."""
     with open(ERROR_LOG_FILE, 'a') as f:
         f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {city_name} ({geoname_id}): {error}\n")
 
-def get_region_and_density(latitude: float, longitude: float) -> Tuple[str, Dict[str, float]]:
-    """
-    Determines the region and provides density ranges based on coordinates.
-    Returns (region_name, density_dict)
-    """
-    # More nuanced regional classification
-    if latitude > 35 and -10 <= longitude <= 40:  # Europe
-        return "Europe", {"high": 10000, "medium": 5000, "low": 2500, "very_low": 1000}
-    elif latitude > 20 and longitude > 60:  # Asia
-        if longitude > 120:  # East Asia (Japan, Korea, Eastern China)
-            return "East Asia", {"high": 15000, "medium": 8000, "low": 4000, "very_low": 2000}
-        else:  # South/Southeast Asia
-            return "South Asia", {"high": 12000, "medium": 6000, "low": 3000, "very_low": 1500}
-    elif 25 <= latitude <= 50 and -130 <= longitude <= -60:  # North America
-        return "North America", {"high": 5000, "medium": 2500, "low": 1200, "very_low": 600}
-    elif latitude < -20 and longitude > 110:  # Australia/Oceania
-        return "Oceania", {"high": 4000, "medium": 2000, "low": 800, "very_low": 400}
-    elif latitude < 0 and -80 <= longitude <= -35:  # South America
-        return "South America", {"high": 12000, "medium": 6000, "low": 3000, "very_low": 1500}
-    elif -35 <= latitude <= 35 and -20 <= longitude <= 50:  # Africa
-        return "Africa", {"high": 8000, "medium": 4000, "low": 2000, "very_low": 1000}
-    else:
-        return "Other", {"high": 6000, "medium": 3000, "low": 1500, "very_low": 750}
+def get_city_key(city_name: str) -> str:
+    """Get standardized city key for lookup."""
+    # Remove common suffixes and clean
+    name = city_name.lower()
+    for suffix in [' city', '-si', ' metropolitan', ' district', ' province']:
+        name = name.replace(suffix, '')
+    name = name.split(',')[0].strip()
+    name = name.split('(')[0].strip()
+    return name
 
-def estimate_area_from_population_advanced(city: City) -> float:
-    """
-    Advanced population-based area estimation with regional and city-size adjustments.
-    Returns area in square kilometers.
-    """
-    if not city.population or city.population < 1000:
-        return 10.0  # Default for very small places
+def get_calibrated_density(city: City) -> float:
+    """Get density calibrated from known city areas."""
+    city_key = get_city_key(city.name)
     
-    population = city.population
-    region, density_ranges = get_region_and_density(city.latitude, city.longitude)
+    # If we have exact data for this city, use it
+    if city_key in KNOWN_CITY_AREAS:
+        known_area = KNOWN_CITY_AREAS[city_key]
+        if city.population and city.population > 0:
+            return city.population / known_area
     
-    # Determine density tier based on population
-    if population > 5_000_000:
-        density = density_ranges["high"]
-    elif population > 1_000_000:
-        density = density_ranges["medium"]
-    elif population > 100_000:
-        density = density_ranges["low"]
+    # Otherwise, find similar cities in the region
+    lat, lon = city.latitude, city.longitude
+    
+    # Get region
+    if lat > 35 and -10 <= lon <= 40:  # Europe
+        region_cities = ["london", "paris", "berlin", "madrid", "rome"]
+        base_density = 3500
+    elif lat > 20 and lon > 60:  # Asia
+        if lon > 120:  # East Asia
+            region_cities = ["tokyo", "seoul", "shanghai", "beijing", "osaka"]
+            base_density = 8000
+        elif lat < 25:  # Southeast Asia
+            region_cities = ["bangkok", "jakarta", "manila", "singapore"]
+            base_density = 10000
+        else:  # South Asia
+            region_cities = ["delhi", "mumbai", "dhaka", "karachi", "kolkata"]
+            base_density = 15000
+    elif 25 <= lat <= 50 and -130 <= lon <= -60:  # North America
+        region_cities = ["new york", "los angeles", "chicago", "houston", "toronto"]
+        base_density = 1500
+    elif lat < -20 and lon > 110:  # Australia/Oceania
+        region_cities = ["sydney", "melbourne", "brisbane", "perth", "auckland"]
+        base_density = 500
+    elif lat < 0 and -80 <= lon <= -35:  # South America
+        region_cities = ["sao paulo", "buenos aires", "rio de janeiro", "lima", "bogota"]
+        base_density = 8000
+    elif -35 <= lat <= 35 and -20 <= lon <= 50:  # Africa
+        region_cities = ["cairo", "lagos", "johannesburg", "nairobi", "kinshasa"]
+        base_density = 4000
     else:
-        density = density_ranges["very_low"]
+        return base_density if 'base_density' in locals() else 3000
     
-    # Special adjustments for known patterns
+    # Calculate average density from known cities in region
+    densities = []
+    for rc in region_cities:
+        if rc in KNOWN_CITY_AREAS:
+            # Use typical population for calibration
+            pop_estimates = {
+                "london": 9000000, "paris": 2200000, "berlin": 3700000,
+                "tokyo": 14000000, "delhi": 33000000, "mumbai": 20000000,
+                "new york": 8300000, "sydney": 5300000, "sao paulo": 12000000,
+                "cairo": 10000000, "lagos": 15000000
+            }
+            if rc in pop_estimates:
+                densities.append(pop_estimates[rc] / KNOWN_CITY_AREAS[rc])
+    
+    if densities:
+        avg_density = np.median(densities)
+        
+        # Adjust by city size
+        if city.population > 10_000_000:
+            return avg_density * 1.2
+        elif city.population > 5_000_000:
+            return avg_density
+        elif city.population > 1_000_000:
+            return avg_density * 0.7
+        else:
+            return avg_density * 0.4
+    
+    return base_density
+
+def estimate_area_improved(city: City) -> float:
+    """Improved area estimation using calibrated data."""
+    if not city.population or city.population < 1000:
+        return 10.0
+    
+    # Check if we have exact data
+    city_key = get_city_key(city.name)
+    if city_key in KNOWN_CITY_AREAS:
+        known_area = KNOWN_CITY_AREAS[city_key]
+        # Allow some variance for population changes
+        return known_area * (1 + 0.1 * np.log10(city.population / 1_000_000))
+    
+    # Get calibrated density
+    density = get_calibrated_density(city)
+    
+    # Special adjustments
     city_name_lower = city.name.lower()
     
-    # Capital cities tend to be less dense (more government buildings, parks)
+    # Metropolitan areas tend to be larger
+    if any(word in city_name_lower for word in ['greater', 'metro', 'region']):
+        density *= 0.3
+    
+    # City proper tends to be denser
+    elif any(word in city_name_lower for word in ['city proper', 'urban', 'downtown']):
+        density *= 2.0
+    
+    # Capital adjustments
     if hasattr(city, 'is_capital') and city.is_capital:
+        if city.population < 1_000_000:
+            density *= 0.5  # Small capitals often include rural areas
+        else:
+            density *= 0.8  # Large capitals have government districts
+    
+    # Port cities
+    if any(word in city_name_lower for word in ['port', 'porto', 'harbor', 'harbour']):
         density *= 0.7
     
-    # Port cities often have industrial areas
-    if any(word in city_name_lower for word in ['port', 'porto', 'harbor', 'harbour']):
-        density *= 0.8
+    estimated_area = city.population / density
     
-    # New World cities tend to be less dense
-    if region in ["North America", "Oceania"] and population < 5_000_000:
-        density *= 0.6
+    # Apply reasonable bounds based on population
+    if city.population > 10_000_000:
+        min_area = 300    # Even hyperdense cities need space
+        max_area = 20000  # Largest admin areas
+    elif city.population > 1_000_000:
+        min_area = 50
+        max_area = 5000
+    elif city.population > 100_000:
+        min_area = 10
+        max_area = 1000
+    else:
+        min_area = 5
+        max_area = 200
     
-    # Asian megacities are extremely dense
-    if region in ["East Asia", "South Asia"] and population > 5_000_000:
-        density *= 1.3
-    
-    # African cities often have lower administrative densities
-    if region == "Africa" and population > 1_000_000:
-        density *= 0.8
-    
-    estimated_area = population / density
-    
-    # Apply bounds based on population
-    # No city should be smaller than ~5 km² or larger than ~5000 km²
-    min_area = max(5.0, population / 50000)  # Even super dense can't exceed 50k/km²
-    max_area = min(5000.0, population / 200)  # Even sprawling cities have >200/km²
-    
-    estimated_area = np.clip(estimated_area, min_area, max_area)
-    
-    print(f"  Population estimate: {population:,} people in {region} → {estimated_area:.1f} km² (density: {density:.0f}/km²)")
-    return estimated_area
+    return np.clip(estimated_area, min_area, max_area)
 
-def repair_polygon(geom: Union[Polygon, MultiPolygon]) -> Optional[Union[Polygon, MultiPolygon]]:
-    """
-    Attempts to repair an invalid polygon using various strategies.
-    """
-    if geom.is_valid:
-        return geom
+async def get_city_area_fast(client: httpx.AsyncClient, city: City) -> Optional[float]:
+    """Get city area with efficient Overpass query."""
+    # Clean city name
+    name_clean = unidecode(city.name).split(',')[0].split('(')[0].strip()
+    
+    # Single comprehensive query
+    query = f'''
+[out:json][timeout:30];
+// Find administrative boundaries containing or near the city
+(
+  // Method 1: Direct name search at various admin levels
+  relation["boundary"="administrative"]["admin_level"~"^[4-9]|10$"]["name"~"^{name_clean}",i](around:50000,{city.latitude},{city.longitude});
+  // Method 2: Containing the coordinate point
+  is_in({city.latitude},{city.longitude})->.a;
+  relation["boundary"="administrative"]["admin_level"~"^[4-9]|10$"](pivot.a);
+);
+out tags bb;
+'''
     
     try:
-        # Strategy 1: Buffer by 0
-        fixed = geom.buffer(0)
-        if fixed.is_valid and not fixed.is_empty:
-            return fixed
-    except:
-        pass
-    
-    try:
-        # Strategy 2: Use make_valid (requires Shapely 1.8+)
-        fixed = make_valid(geom)
-        if fixed.is_valid and not fixed.is_empty:
-            return fixed
-    except:
-        pass
-    
-    try:
-        # Strategy 3: Convex hull (last resort - will lose detail)
-        fixed = geom.convex_hull
-        if fixed.is_valid and not fixed.is_empty:
-            print("    Warning: Using convex hull - area may be overestimated")
-            return fixed
-    except:
-        pass
-    
-    return None
-
-def calculate_area_from_polygon(polygon: Union[Polygon, MultiPolygon], lat: float) -> Optional[float]:
-    """Calculate area in km² using appropriate equal-area projection."""
-    try:
-        # Handle MultiPolygon
-        if isinstance(polygon, MultiPolygon):
-            total_area = 0
-            for poly in polygon.geoms:
-                area = calculate_area_from_polygon(poly, lat)
-                if area:
-                    total_area += area
-            return total_area if total_area > 0 else None
+        endpoint = random.choice(OVERPASS_API_ENDPOINTS)
+        response = await client.post(
+            endpoint,
+            data={'data': query},
+            timeout=35.0
+        )
         
-        # Use Albers Equal Area projection centered on the location
-        proj_string = (f"+proj=aea +lat_1={lat-5} +lat_2={lat+5} +lat_0={lat} "
-                      f"+lon_0={polygon.centroid.x} +datum=WGS84 +units=m +no_defs")
-        
-        transformer = pyproj.Transformer.from_crs('EPSG:4326', proj_string, always_xy=True)
-        polygon_projected = transform(transformer.transform, polygon)
-        
-        area_m2 = abs(polygon_projected.area)
-        area_km2 = area_m2 / 1_000_000
-        
-        # Sanity check
-        if area_km2 < 0.1 or area_km2 > 50000:
-            print(f"    Warning: Calculated area {area_km2:.1f} km² seems unrealistic")
+        if response.status_code != 200:
             return None
+        
+        data = response.json()
+        elements = data.get('elements', [])
+        
+        if not elements:
+            return None
+        
+        # Find best matching relation
+        candidates = []
+        name_lower = name_clean.lower()
+        
+        for elem in elements:
+            if elem['type'] != 'relation':
+                continue
+                
+            tags = elem.get('tags', {})
+            admin_level = int(tags.get('admin_level', '99'))
+            name = tags.get('name', '') or tags.get('name:en', '')
             
-        return area_km2
+            if not name:
+                continue
+            
+            # Calculate match score
+            elem_name_lower = name.lower()
+            
+            # Perfect match
+            if name_lower == elem_name_lower:
+                score = 0 + admin_level * 0.01
+            # Contains match
+            elif name_lower in elem_name_lower or elem_name_lower in name_lower:
+                score = 1 + admin_level * 0.01
+            # Skip if no reasonable match
+            else:
+                continue
+                
+            # Get area from bounding box
+            bounds = elem.get('bounds', {})
+            if bounds:
+                lat_span = bounds['maxlat'] - bounds['minlat']
+                lon_span = bounds['maxlon'] - bounds['minlon']
+                
+                # Convert to km (approximate)
+                lat_km = lat_span * 111.0
+                lon_km = lon_span * 111.0 * np.cos(np.radians(city.latitude))
+                
+                # Bounding box area
+                bbox_area = lat_km * lon_km
+                
+                # Admin boundaries typically use 50-80% of their bbox
+                # Higher admin levels tend to be more irregular
+                if admin_level <= 4:
+                    fill_factor = 0.6
+                elif admin_level <= 6:
+                    fill_factor = 0.65
+                elif admin_level <= 8:
+                    fill_factor = 0.7
+                else:
+                    fill_factor = 0.75
+                
+                estimated_area = bbox_area * fill_factor
+                
+                candidates.append({
+                    'name': name,
+                    'level': admin_level,
+                    'area': estimated_area,
+                    'score': score
+                })
+        
+        if not candidates:
+            return None
+        
+        # Sort by score (best match first)
+        candidates.sort(key=lambda x: x['score'])
+        best = candidates[0]
+        
+        print(f"    Found: {best['name']} (L{best['level']}) ~{best['area']:.0f} km²")
+        return best['area']
+        
     except Exception as e:
-        print(f"    Area calculation error: {str(e)}")
+        print(f"    Query error: {str(e)[:50]}")
         return None
 
-def extract_polygon_from_overpass(element: dict) -> Optional[Union[Polygon, MultiPolygon]]:
-    """Extract polygon from Overpass API response element with improved handling."""
-    try:
-        if element.get('type') == 'relation' and element.get('members'):
-            # Collect coordinates by role
-            outer_coords = []
-            inner_coords_list = []
-            
-            for member in element['members']:
-                if not member.get('geometry'):
-                    continue
-                    
-                coords = [(p['lon'], p['lat']) for p in member['geometry']]
-                if len(coords) < 4:  # Need at least 4 points for a valid ring
-                    continue
-                
-                # Ensure the ring is closed
-                if coords[0] != coords[-1]:
-                    coords.append(coords[0])
-                
-                role = member.get('role', 'outer')
-                if role == 'inner':
-                    inner_coords_list.append(coords)
-                else:  # 'outer' or empty role
-                    outer_coords.extend(coords[:-1])  # Remove duplicate closing point
-            
-            if outer_coords:
-                # Ensure outer ring is closed
-                if len(outer_coords) > 0 and outer_coords[0] != outer_coords[-1]:
-                    outer_coords.append(outer_coords[0])
-                
-                if len(outer_coords) >= 4:
-                    try:
-                        # Create polygon with holes if inner rings exist
-                        if inner_coords_list:
-                            poly = Polygon(outer_coords, holes=inner_coords_list)
-                        else:
-                            poly = Polygon(outer_coords)
-                        
-                        # Repair if needed
-                        if not poly.is_valid:
-                            poly = repair_polygon(poly)
-                        
-                        return poly
-                    except Exception as e:
-                        print(f"    Polygon creation error: {str(e)}")
-                        # Try without holes
-                        try:
-                            poly = Polygon(outer_coords)
-                            if not poly.is_valid:
-                                poly = repair_polygon(poly)
-                            return poly
-                        except:
-                            pass
-                            
-        elif element.get('type') == 'way' and element.get('geometry'):
-            coords = [(p['lon'], p['lat']) for p in element['geometry']]
-            if len(coords) >= 3:
-                # Ensure closed
-                if coords[0] != coords[-1]:
-                    coords.append(coords[0])
-                    
-                try:
-                    poly = Polygon(coords)
-                    if not poly.is_valid:
-                        poly = repair_polygon(poly)
-                    return poly
-                except Exception as e:
-                    print(f"    Way polygon error: {str(e)}")
-                        
-    except Exception as e:
-        print(f"    Polygon extraction error: {str(e)}")
-    
-    return None
-
-async def get_area_from_overpass_improved(client: httpx.AsyncClient, city: City) -> Optional[float]:
-    """
-    Improved Overpass query with better error handling and multiple strategies.
-    """
-    # Priority order for city proper boundaries
-    admin_levels = ['8', '9', '7', '6', '10', '5', '4']
-    
-    # Try different name variations
-    name_variations = [
-        city.name,
-        unidecode(city.name),
-        city.name.split(',')[0].strip(),  # Remove any suffixes
-        city.name.split('(')[0].strip(),   # Remove parenthetical info
-        city.name.replace("'", ""),        # Remove apostrophes
-        city.name.replace("-", " "),       # Replace hyphens with spaces
-    ]
-    
-    # Remove duplicates while preserving order
-    name_variations = list(dict.fromkeys(name_variations))
-    
-    for admin_level in admin_levels:
-        for name_variant in name_variations[:2]:  # Only try first 2 variations to save time
-            print(f"  Trying admin_level={admin_level}, name='{name_variant}'...")
-            
-            # Simplified query to reduce complexity
-            query = f"""
-            [out:json][timeout:60];
-            (
-              // Direct boundary search
-              relation["boundary"="administrative"]["admin_level"="{admin_level}"]
-                      ["name"~"^{name_variant}$",i]
-                      (around:50000,{city.latitude},{city.longitude});
-              
-              // Fallback to looser name matching
-              relation["boundary"="administrative"]["admin_level"="{admin_level}"]
-                      ["name"~"{name_variant}",i]
-                      ({city.latitude-0.5},{city.longitude-0.5},{city.latitude+0.5},{city.longitude+0.5});
-            );
-            out body;
-            >;
-            out skel qt;
-            """
-            
-            try:
-                # Rotate through endpoints
-                endpoint = random.choice(OVERPASS_API_ENDPOINTS)
-                response = await client.post(
-                    endpoint,
-                    data={'data': query},
-                    timeout=90.0  # Increased timeout
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    
-                    if data.get('elements'):
-                        # Build a map of nodes
-                        nodes = {}
-                        ways = {}
-                        relations = []
-                        
-                        for elem in data['elements']:
-                            if elem['type'] == 'node':
-                                nodes[elem['id']] = (elem['lon'], elem['lat'])
-                            elif elem['type'] == 'way':
-                                ways[elem['id']] = elem
-                            elif elem['type'] == 'relation':
-                                relations.append(elem)
-                        
-                        # Process relations
-                        for relation in relations:
-                            tags = relation.get('tags', {})
-                            found_name = tags.get('name', 'Unknown')
-                            
-                            # Check if this is likely the right boundary
-                            if name_variant.lower() not in found_name.lower():
-                                continue
-                            
-                            print(f"    Found: '{found_name}'")
-                            
-                            # Try to build geometry from members
-                            try:
-                                outer_rings = []
-                                inner_rings = []
-                                
-                                for member in relation.get('members', []):
-                                    if member['type'] != 'way':
-                                        continue
-                                    
-                                    way_id = member['ref']
-                                    if way_id not in ways:
-                                        continue
-                                    
-                                    way = ways[way_id]
-                                    way_nodes = way.get('nodes', [])
-                                    
-                                    # Build coordinate list
-                                    coords = []
-                                    for node_id in way_nodes:
-                                        if node_id in nodes:
-                                            coords.append(nodes[node_id])
-                                    
-                                    if len(coords) >= 3:
-                                        if member.get('role') == 'inner':
-                                            inner_rings.append(coords)
-                                        else:
-                                            outer_rings.append(coords)
-                                
-                                if outer_rings:
-                                    # Merge outer rings
-                                    all_coords = []
-                                    for ring in outer_rings:
-                                        all_coords.extend(ring)
-                                    
-                                    if len(all_coords) >= 3:
-                                        poly = Polygon(all_coords)
-                                        if not poly.is_valid:
-                                            poly = repair_polygon(poly)
-                                        
-                                        if poly and poly.is_valid:
-                                            area = calculate_area_from_polygon(poly, city.latitude)
-                                            if area and area > 0:
-                                                print(f"    → Area: {area:.1f} km²")
-                                                return area
-                                
-                            except Exception as e:
-                                print(f"    Geometry building error: {str(e)}")
-                
-                # Rate limiting
-                await asyncio.sleep(1.5)
-                
-            except httpx.TimeoutException:
-                print(f"    Timeout on {endpoint}")
-                await asyncio.sleep(3.0)
-            except Exception as e:
-                print(f"    Error: {str(e)}")
-                await asyncio.sleep(2.0)
-    
-    return None
-
-def apply_heuristic_validation(
-    overpass_area: Optional[float],
-    population_estimate: float,
-    city: City
-) -> Tuple[float, str]:
-    """
-    Apply smart heuristics to validate and choose the best area estimate.
-    Returns (final_area, method_used)
-    """
+def validate_area(overpass_area: Optional[float], pop_estimate: float, city: City) -> Tuple[float, str]:
+    """Validate and choose the best area estimate with improved logic."""
     if overpass_area is None:
-        return population_estimate, "Population estimate (no boundary found)"
+        return pop_estimate, "Population estimate"
+    
+    # Check if it's a known city
+    city_key = get_city_key(city.name)
+    if city_key in KNOWN_CITY_AREAS:
+        known_area = KNOWN_CITY_AREAS[city_key]
+        # If Overpass is within 50% of known value, trust it
+        if 0.5 <= (overpass_area / known_area) <= 2.0:
+            return overpass_area, "Overpass (validated)"
     
     # Calculate ratio
-    ratio = overpass_area / population_estimate if population_estimate > 0 else float('inf')
+    ratio = overpass_area / pop_estimate if pop_estimate > 0 else float('inf')
     
-    # Define acceptance criteria based on city size
-    if city.population > 5_000_000:
-        # Large cities: more tolerance for variation
-        lower_bound, upper_bound = 0.2, 8.0
+    # More flexible bounds based on city characteristics
+    if city.population > 10_000_000:
+        # Megacities can have huge variations
+        lower_bound, upper_bound = 0.1, 20.0
+    elif city.population > 5_000_000:
+        lower_bound, upper_bound = 0.15, 15.0
     elif city.population > 1_000_000:
-        # Medium cities
-        lower_bound, upper_bound = 0.25, 6.0
-    elif city.population > 100_000:
-        # Small cities
-        lower_bound, upper_bound = 0.3, 5.0
+        lower_bound, upper_bound = 0.2, 10.0
     else:
-        # Towns: tighter bounds
-        lower_bound, upper_bound = 0.4, 4.0
+        lower_bound, upper_bound = 0.25, 8.0
     
-    # Special cases
-    if hasattr(city, 'is_capital') and city.is_capital and ratio > upper_bound:
-        # Capitals often have larger administrative areas
-        upper_bound *= 1.5
-    
-    # Validation
+    # Additional checks
     if lower_bound <= ratio <= upper_bound:
-        # Additional sanity checks
-        if overpass_area < 1.0:
-            return population_estimate, "Population estimate (area too small)"
-        elif overpass_area > 10000.0 and city.population < 1_000_000:
-            return population_estimate, "Population estimate (area too large for population)"
+        # Sanity checks on absolute size
+        if overpass_area < 1.0 and city.population > 50000:
+            return pop_estimate, "Population estimate (area too small)"
+        elif overpass_area > 50000:  # Larger than Belgium
+            return pop_estimate, "Population estimate (area unrealistic)"
         else:
-            return overpass_area, f"Overpass verified (ratio: {ratio:.2f})"
+            return overpass_area, f"Overpass (ratio: {ratio:.1f})"
     else:
-        # Log why it was rejected
+        # If Overpass seems wrong, use the better estimate
         if ratio < lower_bound:
-            reason = "too small"
-        else:
-            reason = "too large"
-        return population_estimate, f"Population estimate (Overpass {reason}, ratio: {ratio:.2f})"
+            # Overpass area too small - might be district not city
+            # Check if population estimate is more reasonable
+            if pop_estimate > overpass_area * 2:
+                return pop_estimate, f"Population estimate (Overpass too small: {overpass_area:.0f} km²)"
+        return pop_estimate, f"Population estimate (ratio {ratio:.1f} out of range)"
 
-async def process_city_batch(cities: List[City], session: AsyncSession, client: httpx.AsyncClient):
-    """Process a batch of cities with rate limiting."""
+async def process_batch(cities: List[City], session: AsyncSession, client: httpx.AsyncClient):
+    """Process a batch of cities efficiently."""
     attribute_name = CityAttributeName.CITY_AREA
     
     for city in cities:
-        print(f"\n{'='*60}")
-        print(f"Processing: {city.name} (ID: {city.geoname_id}, Pop: {city.population:,})")
+        print(f"\n{city.name} (Pop: {city.population:,})", end='', flush=True)
         
         try:
-            # 1. Get Overpass area
-            overpass_area = await get_area_from_overpass_improved(client, city)
+            # Get estimates
+            start_time = time.time()
+            overpass_area = await get_city_area_fast(client, city)
+            query_time = time.time() - start_time
             
-            # 2. Get population estimate
-            pop_estimate = estimate_area_from_population_advanced(city)
+            pop_estimate = estimate_area_improved(city)
             
-            # 3. Apply heuristic validation
-            final_area, method = apply_heuristic_validation(overpass_area, pop_estimate, city)
+            # Validate and choose
+            final_area, method = validate_area(overpass_area, pop_estimate, city)
             
-            print(f"\nResult: {final_area:.1f} km² ({method})")
+            # Show what we're using
+            if "Overpass" in method:
+                print(f" → {final_area:.0f} km² ({method}, {query_time:.1f}s)")
+            else:
+                if overpass_area:
+                    print(f" → {final_area:.0f} km² ({method})")
+                else:
+                    print(f" → {final_area:.0f} km² (Est)")
             
-            # 4. Save to database
+            # Save to database
             stmt = select(CityAttribute).where(
                 CityAttribute.city_id == city.id,
                 CityAttribute.attribute_name == attribute_name
             )
             attr = (await session.execute(stmt)).scalars().first()
             
+            notes = {
+                "method": method,
+                "overpass_area": overpass_area,
+                "population_estimate": pop_estimate,
+                "final_area": final_area,
+                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
             if attr:
                 attr.raw_value = final_area
                 attr.normalized_score = final_area
-                attr.notes = {
-                    "method": method,
-                    "overpass_area": overpass_area,
-                    "population_estimate": pop_estimate,
-                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S')
-                }
+                attr.notes = notes
             else:
                 attr = CityAttribute(
                     city_id=city.id,
                     attribute_name=attribute_name,
                     raw_value=final_area,
                     normalized_score=final_area,
-                    notes={
-                        "method": method,
-                        "overpass_area": overpass_area,
-                        "population_estimate": pop_estimate,
-                        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S')
-                    }
+                    notes=notes
                 )
                 session.add(attr)
             
@@ -532,20 +502,20 @@ async def process_city_batch(cities: List[City], session: AsyncSession, client: 
             log_processed_city(city.geoname_id)
             
         except Exception as e:
-            error_msg = f"Failed to process: {str(e)}"
-            print(f"\nERROR: {error_msg}")
-            log_error(city.name, city.geoname_id, error_msg)
-            
-            # Still log as processed to avoid retrying bad cities
+            print(f" → ERROR: {str(e)[:50]}")
+            log_error(city.name, city.geoname_id, str(e))
             log_processed_city(city.geoname_id)
+        
+        # Rate limiting
+        await asyncio.sleep(0.5)
 
 async def main():
-    """Main function to process all cities."""
+    """Main processing function."""
     processed_ids = load_processed_cities()
-    print(f"Found {len(processed_ids)} already processed cities.")
+    print(f"Resuming... {len(processed_ids)} already processed.")
     
     async with AsyncSessionLocal() as session:
-        # Get unprocessed cities, prioritizing by population
+        # Get unprocessed cities
         stmt = (
             select(City)
             .where(City.geoname_id.notin_(processed_ids))
@@ -556,33 +526,37 @@ async def main():
         cities_to_process = result.scalars().all()
         
         total_cities = len(cities_to_process)
-        print(f"Found {total_cities} cities to process.")
+        print(f"Processing {total_cities} cities...\n")
         
         if not cities_to_process:
-            print("No cities to process. Exiting.")
             return
         
-        # Process in batches to manage memory and allow interruption
-        batch_size = 10
+        # Process in batches
+        batch_size = 20
+        start_time = time.time()
         
-        async with httpx.AsyncClient(timeout=90.0) as client:
+        async with httpx.AsyncClient(timeout=40.0) as client:
             for i in range(0, total_cities, batch_size):
                 batch = cities_to_process[i:i + batch_size]
-                print(f"\n{'#'*60}")
-                print(f"Processing batch {i//batch_size + 1}/{(total_cities + batch_size - 1)//batch_size}")
-                print(f"Cities {i + 1}-{min(i + batch_size, total_cities)} of {total_cities}")
-                print(f"{'#'*60}")
+                batch_start = time.time()
                 
-                await process_city_batch(batch, session, client)
+                print(f"\n--- Batch {i//batch_size + 1} ({i+1}-{min(i+batch_size, total_cities)} of {total_cities}) ---")
                 
-                # Longer pause between batches
+                await process_batch(batch, session, client)
+                
+                # Stats
+                batch_time = time.time() - batch_start
+                total_time = time.time() - start_time
+                avg_time = total_time / (i + len(batch))
+                remaining = (total_cities - i - len(batch)) * avg_time
+                
+                print(f"\nBatch: {batch_time:.1f}s, Avg: {avg_time:.1f}s/city, ETA: {remaining/60:.1f} min")
+                
+                # Pause between batches
                 if i + batch_size < total_cities:
-                    print(f"\nPausing between batches...")
-                    await asyncio.sleep(5.0)
+                    await asyncio.sleep(2.0)
         
-        print(f"\n{'='*60}")
-        print(f"Processing complete! Processed {total_cities} cities.")
-        print(f"Check {ERROR_LOG_FILE} for any errors.")
+        print(f"\n\nComplete! Processed {total_cities} cities in {(time.time() - start_time)/60:.1f} minutes")
 
 if __name__ == "__main__":
     asyncio.run(main())
