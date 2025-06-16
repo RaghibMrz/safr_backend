@@ -19,7 +19,6 @@ OPENWEATHER_HISTORY_API_URL = "http://api.openweathermap.org/data/2.5/air_pollut
 PROGRESS_FILE = Path(__file__).parent / "air_quality_progress.log"
 
 # --- Constants for easy configuration ---
-API_REQUEST_INTERVAL = 1.1 # Seconds to wait between each API call
 dotenv_path = Path(__file__).resolve().parent.parent.parent / '.env'
 load_dotenv(dotenv_path=dotenv_path)
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -51,9 +50,12 @@ async def fetch_and_save_scores(session: AsyncSession):
     print("--- Fetching and saving raw air quality scores (from OpenWeatherMap History) ---")
     
     processed_ids = load_processed_cities()
-    print(f"Found {len(processed_ids)} already processed cities. Resuming...")
+    result = await session.execute(select(City.geoname_id))
+    all_city_ids = {row[0] for row in result.all()}
+    not_processed_ids = all_city_ids - processed_ids
+    print(f"Found {len(not_processed_ids)} new cities to process.")
 
-    stmt = select(City).where(City.geoname_id.notin_(processed_ids))
+    stmt = select(City).where(City.geoname_id.in_(not_processed_ids))
     result = await session.execute(stmt)
     cities_to_process = result.scalars().all()
     total_cities = len(cities_to_process)
@@ -120,7 +122,7 @@ async def fetch_and_save_scores(session: AsyncSession):
             except Exception as e:
                 print(f"  FAILURE: Could not process {city.name}. Error: {e}")
             
-            await asyncio.sleep(API_REQUEST_INTERVAL)
+            # await asyncio.sleep(API_REQUEST_INTERVAL)
 
 async def normalize_all_scores(session: AsyncSession):
     """

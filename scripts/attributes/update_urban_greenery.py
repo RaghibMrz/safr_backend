@@ -2,12 +2,12 @@
 import asyncio
 import httpx
 import os
-import random
 from pathlib import Path
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.future import select
 from sqlalchemy.orm import sessionmaker
+import numpy as np
 
 # --- App-specific Imports ---
 from safr_backend.models import City, CityAttribute
@@ -16,9 +16,9 @@ from safr_backend.constants import CityAttributeName
 # --- Configuration ---
 OVERPASS_API_ENDPOINTS = [
     "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass-api.de/api/interpreter"
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter"
 ]
-# This is the query for a SINGLE city's greenery count.
 OVERPASS_QUERY_TEMPLATE = """
 [out:json][timeout:60];
 (
@@ -32,7 +32,7 @@ OVERPASS_QUERY_TEMPLATE = """
 out count;
 """
 PROGRESS_FILE = Path(__file__).parent / "urban_greenery_progress.log"
-API_REQUEST_INTERVAL = 1.1
+API_CONCURRENT_REQUESTS = 10
 
 # --- Database Setup ---
 dotenv_path = Path(__file__).resolve().parent.parent.parent / '.env'
@@ -55,12 +55,16 @@ def log_processed_city(geoname_id: str):
         f.write(f"{geoname_id}\n")
 
 async def fetch_and_save_scores(session: AsyncSession):
-    print("--- Fetching and saving raw urban greenery scores (sequentially) ---")
+    """Fetches raw data using polite concurrency and saves progress."""
+    print("--- Fetching and saving raw urban greenery scores (with polite concurrency) ---")
     
     processed_ids = load_processed_cities()
-    print(f"Found {len(processed_ids)} already processed cities. Resuming...")
+    result = await session.execute(select(City.geoname_id))
+    all_city_ids = {row[0] for row in result.all()}
+    not_processed_ids = all_city_ids - processed_ids
+    print(f"Found {len(not_processed_ids)} new cities to process.")
 
-    stmt = select(City).where(City.geoname_id.notin_(processed_ids))
+    stmt = select(City).where(City.geoname_id.in_(not_processed_ids))
     result = await session.execute(stmt)
     cities_to_process = result.scalars().all()
     total_cities = len(cities_to_process)
@@ -72,80 +76,108 @@ async def fetch_and_save_scores(session: AsyncSession):
     attribute_name = CityAttributeName.URBAN_GREENERY
     
     async with httpx.AsyncClient(timeout=90.0) as client:
-        for i, city in enumerate(cities_to_process):
-            print(f"Processing city {i + 1} of {total_cities}: {city.name} ({city.geoname_id})")
-            
-            query = OVERPASS_QUERY_TEMPLATE.format(lat=city.latitude, lon=city.longitude)
-            
-            try:
-                endpoint_url = random.choice(OVERPASS_API_ENDPOINTS)
-                response = await client.post(endpoint_url, data=query)
-                response.raise_for_status()
-                data = response.json()
+        for i in range(0, total_cities, API_CONCURRENT_REQUESTS):
+            batch = cities_to_process[i:i + API_CONCURRENT_REQUESTS]
+            print(f"Processing batch {i//API_CONCURRENT_REQUESTS + 1} of {total_cities//API_CONCURRENT_REQUESTS + 1} ({len(batch)} cities)...")
 
-                raw_score = int(data.get("elements", [{}])[0].get("tags", {}).get("total", 0))
-                print(f"  SUCCESS: Found {raw_score} green spaces for {city.name}")
+            tasks = []
+            for city in batch:
+                query = OVERPASS_QUERY_TEMPLATE.format(lat=city.latitude, lon=city.longitude)
+                endpoint_url = OVERPASS_API_ENDPOINTS[2]
+                tasks.append(client.post(endpoint_url, data=query))
 
-                stmt_existing = select(CityAttribute).where(CityAttribute.city_id == city.id, CityAttribute.attribute_name == attribute_name)
-                result_existing = await session.execute(stmt_existing)
-                attr = result_existing.scalars().first()
-                
-                if attr:
-                    attr.raw_value = raw_score
+            responses = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for city, response in zip(batch, responses):
+                if isinstance(response, httpx.Response) and response.status_code == 200:
+                    try:
+                        data = response.json()
+                        raw_score = int(data.get("elements", [{}])[0].get("tags", {}).get("total", 0))
+                        print(f"  SUCCESS: Found {raw_score} green spaces for {city.name}")
+
+                        # Upsert logic for this specific city
+                        stmt_existing = select(CityAttribute).where(CityAttribute.city_id == city.id, CityAttribute.attribute_name == attribute_name)
+                        result_existing = await session.execute(stmt_existing)
+                        attr = result_existing.scalars().first()
+                        
+                        if attr:
+                            attr.raw_value = raw_score
+                        else:
+                            attr = CityAttribute(city_id=city.id, attribute_name=attribute_name, raw_value=raw_score, normalized_score=0)
+                        
+                        session.add(attr)
+                        await session.commit()
+                        log_processed_city(city.geoname_id)
+
+                    except Exception as e:
+                        print(f"  FAILURE (Post-processing): Could not process response for {city.name}. Error: {e}")
                 else:
-                    attr = CityAttribute(
-                        city_id=city.id, attribute_name=attribute_name,
-                        raw_value=raw_score, normalized_score=0
-                    )
-                session.add(attr)
-                await session.commit()
-                log_processed_city(city.geoname_id)
-
-            except Exception as e:
-                print(f"  FAILURE: Could not process {city.name}. Error: {e}")
+                    print(f"  FAILURE (HTTP): Could not fetch data for {city.name}. Error: {response}")
             
-            # Wait before processing the next city to be polite to the public API
-            await asyncio.sleep(API_REQUEST_INTERVAL)
+            if (i + API_CONCURRENT_REQUESTS) < total_cities:
+                print(f"Batch complete")
+
 
 async def normalize_all_scores(session: AsyncSession):
-    """Reads all raw scores from the DB, normalizes them, and saves the final score."""
-    print("\n--- Pass 2: Normalizing all scores ---")
+    """
+    Reads all raw scores, calculates a per-capita score, and applies min-max scaling
+    after clipping extreme outliers at the 99th percentile.
+    """
+    print("\n--- Normalizing scores using per-capita and outlier clipping ---")
     
     attribute_name = CityAttributeName.URBAN_GREENERY
     
-    stmt = select(CityAttribute.raw_value).where(
-        CityAttribute.attribute_name == attribute_name,
-        CityAttribute.raw_value.isnot(None)
+    stmt = (
+        select(CityAttribute, City.population)
+        .join(City, CityAttribute.city_id == City.id)
+        .where(CityAttribute.attribute_name == attribute_name)
     )
     result = await session.execute(stmt)
-    raw_scores = result.scalars().all()
+    all_attributes_with_pop = result.all()
 
-    if not raw_scores or len(raw_scores) < 2:
-        print("Not enough raw scores found to normalize. At least 2 are required.")
+    per_capita_scores_map = {}
+    valid_scores = []
+    for attr, population in all_attributes_with_pop:
+        if attr.raw_value and population and attr.raw_value > 0 and population > 0:
+            score = attr.raw_value / population
+            per_capita_scores_map[attr.id] = score
+            valid_scores.append(score)
+
+    if not valid_scores or len(valid_scores) < 2:
+        print("Not enough valid data to normalize.")
+        for attr, _ in all_attributes_with_pop:
+            attr.normalized_score = -1.0
+        await session.commit()
         return
 
-    min_score = min(raw_scores)
-    max_score = max(raw_scores)
-    print(f"Normalizing based on Min={min_score}, Max={max_score}")
+    # Clip extreme outliers at the 99th percentile
+    p99 = np.percentile(valid_scores, 99)
+    print(f"Clipping scores at 99th percentile: {p99:.6f}")
+    
+    clipped_scores = [min(score, p99) for score in valid_scores]
+    
+    min_score = min(clipped_scores)
+    max_score = max(clipped_scores) # This will now be equal to p99
+    print(f"Normalizing based on clipped range: Min={min_score:.6f}, Max={max_score:.6f}")
 
-    if max_score == min_score:
-        print("All raw scores are the same. Setting normalized score to 0.5 for all.")
-    
-    all_attributes_stmt = select(CityAttribute).where(CityAttribute.attribute_name == attribute_name)
-    all_attributes_result = await session.execute(all_attributes_stmt)
-    
     update_count = 0
-    for attr in all_attributes_result.scalars().all():
-        if attr.raw_value is not None:
+    for attr, _ in all_attributes_with_pop:
+        per_capita_score = per_capita_scores_map.get(attr.id)
+        
+        if per_capita_score is not None:
+            clipped_score = min(per_capita_score, p99)
             if max_score > min_score:
-                attr.normalized_score = (attr.raw_value - min_score) / (max_score - min_score)
+                attr.normalized_score = (clipped_score - min_score) / (max_score - min_score)
             else:
                 attr.normalized_score = 0.5
-            session.add(attr)
-            update_count += 1
+        else:
+            attr.normalized_score = -1.0
+        
+        session.add(attr)
+        update_count += 1
         
     await session.commit()
-    print(f"Successfully updated {update_count} attributes with normalized scores.")
+    print(f"Successfully updated {update_count} attributes with clipped normalized scores.")
 
 
 async def main():

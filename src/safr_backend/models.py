@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, UniqueConstraint, Index, func, BigInteger
+from sqlalchemy import JSON, Column, Integer, String, Float, DateTime, ForeignKey, UniqueConstraint, Index, func, BigInteger, Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func as sql_func
 from .database import Base
@@ -35,6 +35,8 @@ class City(Base):
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     population = Column(BigInteger, nullable=True)
+    area = Column(BigInteger, nullable=True)
+    is_capital = Column(Boolean, nullable=False, default=False, server_default='false')
 
     attributes = relationship("CityAttribute", back_populates="city")
     user_rankings = relationship("UserCityRanking", back_populates="city")
@@ -48,6 +50,7 @@ class CityAttribute(Base):
     attribute_name = Column(String, nullable=False, index=True)
     raw_value = Column(Float, nullable=True)
     normalized_score = Column(Float, nullable=False)
+    notes = Column(JSON, nullable=True)
 
     city = relationship("City", back_populates="attributes")
 

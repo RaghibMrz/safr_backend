@@ -160,6 +160,7 @@ Attributes:
 ```bash
 poetry run python scripts/attributes/update_air_quality.py
 poetry run python scripts/attributes/update_urban_greenery.py
+poetry run python scripts/attributes/update_internet_speed.py
 ```
 
 Air Quality:
@@ -179,4 +180,4 @@ Internet Speed:
 Urban Greenery:
 
 - uses the overpass.kumi open source API to calculate the urban greenery index using public green areas
-- normalized score is the min-max normalized urban greenery index
+- normalized score is the min-max normalized urban greenery index with population density as a normalising factor
