@@ -35,7 +35,7 @@ class City(Base):
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     population = Column(BigInteger, nullable=True)
-    area = Column(BigInteger, nullable=True)
+    area = Column(Float, nullable=True)
     is_capital = Column(Boolean, nullable=False, default=False, server_default='false')
 
     attributes = relationship("CityAttribute", back_populates="city")

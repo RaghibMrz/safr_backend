@@ -6,7 +6,8 @@ class CityAttributeName(str, Enum):
     This is used in the application layer to ensure consistency,
     but is NOT a database-level enum, preserving flexibility.
     """
-    URBAN_GREENERY = 'urban_greenery'
+    URBAN_GREENERY = 'urban_greenery' # count
+    URBAN_GREENERY_AREA = 'urban_greenery_area' # area
     AIR_QUALITY = 'air_quality'
     INTERNET_SPEED = 'internet_speed'
     COST_OF_LIVING = 'cost_of_living'

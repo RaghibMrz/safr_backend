@@ -20,7 +20,7 @@ from safr_backend.models import City, CityAttribute
 from safr_backend.constants import CityAttributeName
 
 # --- Configuration ---
-OVERPASS_API_URL = "https://overpass.kumi.systems/api/interpreter"
+OVERPASS_API_URL = "https://overpass.private.coffee/api/interpreter"
 PROGRESS_FILE = Path(__file__).parent / "cost_of_living_progress.log"
 
 # Simplified query that captures ALL restaurants and hotels
